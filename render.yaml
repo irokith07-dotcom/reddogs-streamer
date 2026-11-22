@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: reddogs-discord-streamer
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev --no-audit
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 22

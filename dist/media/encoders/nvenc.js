@@ -1,0 +1,28 @@
+import { FF_ENCODER_AV1_NVENC, FF_ENCODER_H264_NVENC, FF_ENCODER_HEVC_NVENC, } from "node-av";
+import { assertPlatformSupported } from "./platform.js";
+export function nvenc({ preset = "p4", spatialAq = false, temporalAq = false, gpu, } = {}) {
+    const options = {
+        preset,
+        "spatial-aq": spatialAq ? "1" : "0",
+        "temporal-aq": temporalAq ? "1" : "0",
+        ...(gpu !== undefined ? { gpu: String(gpu) } : {}),
+    };
+    return (() => {
+        assertPlatformSupported("nvenc", "linux", "win32");
+        return {
+            H264: {
+                name: FF_ENCODER_H264_NVENC,
+                options,
+            },
+            H265: {
+                name: FF_ENCODER_HEVC_NVENC,
+                options,
+            },
+            AV1: {
+                name: FF_ENCODER_AV1_NVENC,
+                options,
+            },
+        };
+    });
+}
+//# sourceMappingURL=nvenc.js.map

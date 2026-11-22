@@ -1,0 +1,8 @@
+node_modules
+package-lock.json
+# Large video files
+dashboard/videos/*
+!dashboard/videos/.gitkeep
+examples/**/config.json
+examples/*/node_modules
+examples/*/dist

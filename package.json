@@ -1,0 +1,32 @@
+{
+    "name": "reddogs-discord-video-streamer",
+    "version": "7.0.0",
+    "description": "RedDOGS Multi-Token Discord Video Streamer and Dashboard",
+    "main": "dashboard/server.js",
+    "type": "module",
+    "scripts": {
+        "start": "node --expose-gc --max-old-space-size=300 dashboard/server.js",
+        "start:container": "rm -rf ~/.npm ~/.cache /home/container/.npm /tmp/* 2>/dev/null; node --expose-gc --max-old-space-size=128 dashboard/server.js --port 25697",
+        "dashboard": "node --expose-gc --max-old-space-size=300 dashboard/server.js",
+        "build": "tsc"
+    },
+    "dependencies": {
+        "@distube/ytdl-core": "^5.2.1",
+        "@lng2004/discord.js-selfbot-v13": "^3.7.2",
+        "@lng2004/node-datachannel": "0.33.2-20260921",
+        "@snazzah/davey": "^0.1.12",
+        "debug-level": "^4.1.1",
+        "express": "^5.3.0",
+        "node-av": "6.2.0",
+        "p-debounce": "^6.0.0",
+        "sharp": "^0.35.5",
+        "yocto-queue": "^1.2.2"
+    },
+    "optionalDependencies": {
+        "@seydx/node-av-linux-x64": "6.2.0",
+        "@seydx/node-av-win32-x64": "6.2.0"
+    },
+    "engines": {
+        "node": ">=22.4.0"
+    }
+}
