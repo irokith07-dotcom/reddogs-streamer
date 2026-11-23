@@ -802,17 +802,40 @@ class BotSession {
           consecutiveErrors = 0;
           console.log(`[${this.user?.tag || this.label}] Cycle #${cycle} finished.`);
           if (!loop) break;
+
+          // Transition smoothly between loop cycles:
+          if (loop && !signal.aborted) {
+            console.log(`[${this.user?.tag || this.label}] Loop active: preparing cycle #${cycle + 1}...`);
+            try {
+              if (this.streamer && mode !== "cam") {
+                this.streamer.stopStream();
+              }
+            } catch {}
+            // Brief 600ms pause to let media buffers clear and re-handshake cleanly
+            await new Promise((r) => setTimeout(r, 600));
+          }
         } catch (err) {
           if (signal.aborted) break;
-          console.error(`[${this.user?.tag || this.label}] Stream playback error:`, err?.message || err);
+          consecutiveErrors++;
+          console.error(`[${this.user?.tag || this.label}] Stream playback error (cycle #${cycle}, error #${consecutiveErrors}):`, err?.message || err);
           
           // Self-heal: Clean any broken partial/temp files
           if (resolved && (resolved.endsWith(".part") || resolved.endsWith(".tmp"))) {
             console.warn(`[Auto-Clean] Corrupted partial file removed: ${resolved}`);
             try { fs.unlinkSync(resolved); } catch {}
           }
-          this.error = "Playback error: " + (err?.message || err);
-          break; // Stop loop immediately on broken file
+
+          if (consecutiveErrors >= 5 || !loop) {
+            this.error = "Playback stopped: " + (err?.message || err);
+            break;
+          }
+
+          // Clean reset stream track before retrying next cycle
+          try {
+            if (this.streamer && mode !== "cam") this.streamer.stopStream();
+          } catch {}
+
+          await new Promise((r) => setTimeout(r, 2000));
         }
       }
       this.isStreaming = false;
@@ -881,9 +904,28 @@ class TokenManager {
 
   load() {
     try {
-      if (fs.existsSync(TOKENS_FILE)) {
+      let list = [];
+      // 1. Check permanent environment variable first (critical for Render / cloud hosts with ephemeral disks)
+      const envTokens = process.env.TOKENS_JSON || process.env.DISCORD_TOKENS;
+      if (envTokens) {
+        try {
+          console.log("[TokenManager] Loading accounts from environment variable (TOKENS_JSON)...");
+          list = JSON.parse(envTokens);
+        } catch {
+          try {
+            const decoded = Buffer.from(envTokens, "base64").toString("utf-8");
+            list = JSON.parse(decoded);
+          } catch {}
+        }
+      }
+
+      // 2. Fall back to local file if no environment variable provided
+      if ((!list || list.length === 0) && fs.existsSync(TOKENS_FILE)) {
         const raw = fs.readFileSync(TOKENS_FILE, "utf-8");
-        const list = JSON.parse(raw);
+        list = JSON.parse(raw);
+      }
+
+      if (Array.isArray(list)) {
         for (const item of list) {
           this.createSession(item);
         }
@@ -891,6 +933,43 @@ class TokenManager {
     } catch (e) {
       console.error("Failed to load tokens file:", e);
     }
+  }
+
+  bulkRestore(list) {
+    if (!Array.isArray(list) || list.length === 0) return 0;
+    let restoredCount = 0;
+    for (const item of list) {
+      if (!item.token || item.token.length < 20) continue;
+      // Look for existing session by id or token
+      let session = this.sessions.get(item.id);
+      if (!session) {
+        for (const s of this.sessions.values()) {
+          if (s.token === item.token) {
+            session = s;
+            break;
+          }
+        }
+      }
+
+      if (session) {
+        session.token = item.token;
+        if (item.label) session.label = item.label;
+        session.autoJoin = !!item.autoJoin;
+        if (item.defaultGuildId) session.defaultGuildId = item.defaultGuildId;
+        if (item.defaultChannelId) session.defaultChannelId = item.defaultChannelId;
+        if (item.presence) session.presence = item.presence;
+        if (item.customStatus !== undefined) session.customStatus = item.customStatus;
+        if (item.video !== undefined) session.video = item.video;
+        if (item.loop !== undefined) session.loop = item.loop;
+        session.start();
+        restoredCount++;
+      } else {
+        this.createSession(item);
+        restoredCount++;
+      }
+    }
+    this.save();
+    return restoredCount;
   }
 
   save() {
@@ -987,6 +1066,43 @@ app.post("/api/tokens", (req, res) => {
 
   manager.save();
   res.json({ success: true, token: session.toJSON() });
+});
+
+// Bulk Restore Tokens (from Browser Backup / LocalStorage)
+app.post("/api/tokens/bulk-restore", (req, res) => {
+  const { tokens } = req.body;
+  if (!Array.isArray(tokens)) {
+    return res.status(400).json({ success: false, error: "Expected an array of tokens" });
+  }
+  const restored = manager.bulkRestore(tokens);
+  console.log(`[TokenManager] Restored ${restored} accounts from browser backup`);
+  res.json({ success: true, restoredCount: restored, tokens: manager.getAll() });
+});
+
+// Export Tokens for Render / Cloud Environment Variables
+app.get("/api/tokens/export-env", (req, res) => {
+  const validSessions = Array.from(manager.sessions.values())
+    .filter((s) => s.token && s.token.length >= 20)
+    .map((s) => ({
+      id: s.id,
+      token: s.token,
+      label: s.label,
+      autoJoin: s.autoJoin,
+      defaultGuildId: s.defaultGuildId,
+      defaultChannelId: s.defaultChannelId,
+      presence: s.presence,
+      customStatus: s.customStatus,
+      video: s.video,
+      loop: s.loop,
+    }));
+
+  const jsonString = JSON.stringify(validSessions);
+  res.json({
+    success: true,
+    count: validSessions.length,
+    jsonString,
+    instructions: "Add an Environment Variable in Render with Key: TOKENS_JSON and Value: <paste jsonString>",
+  });
 });
 
 app.put("/api/tokens/:id", (req, res) => {
@@ -1296,10 +1412,44 @@ app.post("/api/clean-disk", (req, res) => {
   }
 });
 
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "ok",
+    uptimeSeconds: Math.round(process.uptime()),
+    timestamp: Date.now(),
+    sessionsCount: manager?.sessions?.size || 0,
+  });
+});
+
 const server = http.createServer(app);
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`\n=================================================`);
   console.log(` RedDOGS Multi-Token Video Streamer Dashboard`);
   console.log(` Running on: http://0.0.0.0:${PORT}`);
   console.log(`=================================================\n`);
+
+  // Render & Cloud Free Tier Anti-Sleep Keep-Alive Pinger
+  const selfUrl = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || process.env.EXTERNAL_URL;
+  if (selfUrl) {
+    console.log(`[Anti-Sleep] Keep-alive self-pinger active for: ${selfUrl}`);
+    // Initial ping after 20s
+    setTimeout(async () => {
+      try {
+        await fetch(`${selfUrl}/api/health`, { headers: { "User-Agent": "Render-KeepAlive" } });
+      } catch {}
+    }, 20000);
+
+    // Recurring ping every 8 minutes (Render free web service sleeps after 15m)
+    setInterval(async () => {
+      try {
+        const res = await fetch(`${selfUrl}/api/health`, {
+          signal: AbortSignal.timeout(10000),
+          headers: { "User-Agent": "Render-KeepAlive" },
+        });
+        console.log(`[Anti-Sleep] Self-ping status: ${res.status} (keeping Render container awake 24/7)`);
+      } catch (e) {
+        console.warn(`[Anti-Sleep] Ping note:`, e?.message);
+      }
+    }, 8 * 60 * 1000);
+  }
 });

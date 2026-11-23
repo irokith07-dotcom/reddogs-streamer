@@ -44,6 +44,40 @@ async function fetchTokens(renderLoading = true) {
     const res = await fetch("/api/tokens");
     const json = await res.json();
     tokens = Array.isArray(json) ? json : (json.tokens || []);
+
+    const hasConfiguredTokens = tokens.some((t) => t.token && t.token.length >= 20);
+
+    if (hasConfiguredTokens) {
+      // Save valid tokens to browser localStorage backup
+      try {
+        localStorage.setItem("reddogs_tokens_backup", JSON.stringify(tokens));
+      } catch {}
+    } else {
+      // Server returned empty tokens (e.g. Render restarted / redeployed)
+      // Check if browser has saved backup and auto-restore
+      try {
+        const saved = localStorage.getItem("reddogs_tokens_backup");
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed) && parsed.some((t) => t.token && t.token.length >= 20)) {
+            console.log("[Auto-Restore] Cloud container restarted. Restoring accounts from browser backup...");
+            const restoreRes = await fetch("/api/tokens/bulk-restore", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ tokens: parsed }),
+            });
+            const restoreJson = await restoreRes.json();
+            if (restoreJson.success && restoreJson.tokens) {
+              tokens = restoreJson.tokens;
+              console.log(`[Auto-Restore] Restored ${restoreJson.restoredCount} accounts!`);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[Auto-Restore] Note:", e);
+      }
+    }
+
     updateMetrics();
     renderTokensGrid();
   } catch (err) {
@@ -56,6 +90,23 @@ async function fetchTokens(renderLoading = true) {
           <button class="btn btn-secondary" onclick="fetchTokens()">Retry Connection</button>
         </div>`;
     }
+  }
+}
+
+async function exportTokensForRender() {
+  try {
+    const res = await fetch("/api/tokens/export-env");
+    const json = await res.json();
+    if (!json.success || !json.jsonString || json.count === 0) {
+      alert("No configured accounts found to export. Please add your token first.");
+      return;
+    }
+    await navigator.clipboard.writeText(json.jsonString);
+    alert(
+      `🎉 Copied TOKENS_JSON to clipboard!\n\nTo keep your tokens PERMANENT on Render:\n1. Open your Render Dashboard -> reddogs-streamer\n2. Click the 'Environment' tab\n3. Click 'Add Environment Variable'\n   - Key: TOKENS_JSON\n   - Value: (Paste from clipboard)\n4. Click 'Save Changes'\n\nNow your accounts will never be lost even if Render restarts!`
+    );
+  } catch (e) {
+    alert("Export error: " + e.message);
   }
 }
 
