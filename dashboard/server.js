@@ -203,6 +203,59 @@ async function ensureYtDlp() {
   return "yt-dlp";
 }
 
+async function fetchCobaltStream(url, targetPartFile, audioOnly = false) {
+  const instances = [
+    "https://api.cobalt.tools",
+    "https://cobalt-api.kwiatekm.tokyo",
+    "https://cobalt.api.scip.cc",
+    "https://api.wuk.sh",
+  ];
+
+  for (const inst of instances) {
+    try {
+      console.log(`[YouTube Cobalt] Attempting API: ${inst}...`);
+      const res = await fetch(`${inst}/`, {
+        method: "POST",
+        signal: AbortSignal.timeout(8000),
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        },
+        body: JSON.stringify({
+          url,
+          videoQuality: "360",
+          downloadMode: audioOnly ? "audio" : "auto",
+        }),
+      });
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      const directUrl = data.url || data.stream;
+      if (!directUrl) continue;
+
+      console.log(`[YouTube Cobalt] Stream resolved! Fetching video file...`);
+      const streamRes = await fetch(directUrl, {
+        signal: AbortSignal.timeout(45000),
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+
+      if (streamRes.ok) {
+        const fileStream = fs.createWriteStream(targetPartFile);
+        const { pipeline } = await import("node:stream/promises");
+        await pipeline(streamRes.body, fileStream);
+        if (fs.existsSync(targetPartFile) && fs.statSync(targetPartFile).size > 50000) {
+          console.log(`[YouTube Cobalt] Download complete via Cobalt API!`);
+          return true;
+        }
+      }
+    } catch (e) {
+      console.warn(`[YouTube Cobalt] Instance ${inst} skipped:`, e?.message);
+    }
+  }
+  return false;
+}
+
 async function fetchInvidiousStream(videoId, targetPartFile) {
   const instances = [
     "https://inv.nadeko.net",
@@ -279,6 +332,18 @@ async function resolveYouTube(url, audioOnly = false) {
   // Clean any stale partial file
   if (fs.existsSync(partFile)) {
     try { fs.unlinkSync(partFile); } catch {}
+  }
+
+  // 1. High-speed Cobalt Proxy Resolver (bypasses datacenter IP blocks completely)
+  try {
+    const cobaltSuccess = await fetchCobaltStream(cleanUrl, partFile, audioOnly);
+    if (cobaltSuccess && fs.existsSync(partFile) && fs.statSync(partFile).size > 50000) {
+      fs.renameSync(partFile, targetFile);
+      console.log(`[YouTube] Successfully downloaded via Cobalt proxy: ${targetFile}`);
+      return targetFile;
+    }
+  } catch (cobaltErr) {
+    console.warn(`[YouTube] Cobalt resolver skipped:`, cobaltErr?.message);
   }
 
   console.log(`[YouTube] Downloading: ${cleanUrl} (Mode: ${audioOnly ? "Audio Player" : "Video/Cam"})`);
@@ -794,7 +859,7 @@ class BotSession {
             {
               type: mode === "cam" ? "cam" : "go-live",
               keepStreamAlive: loop && !signal.aborted,
-              readrateInitialBurst: 1.5,
+              readrateInitialBurst: 3.0,
             },
             signal
           );

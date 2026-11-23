@@ -132,7 +132,7 @@ export class WebRtcConnWrapper {
         const rtpConfigAudio = new RtpPacketizationConfig(audioSsrc, "", CodecPayloadType.opus.payload_type, CodecPayloadType.opus.clockRate);
         rtpConfigAudio.playoutDelayId = 5;
         rtpConfigAudio.playoutDelayMin = 0;
-        rtpConfigAudio.playoutDelayMax = 1;
+        rtpConfigAudio.playoutDelayMax = 5;
         this._audioPacketizer = new RtpPacketizer(rtpConfigAudio);
         this._audioPacketizer.addToChain(new RtcpSrReporter(rtpConfigAudio));
         this._audioPacketizer.addToChain(new RtcpNackResponder());
@@ -140,7 +140,7 @@ export class WebRtcConnWrapper {
         const rtpConfigVideo = new RtpPacketizationConfig(videoSsrc, "", CodecPayloadType[this._videoCodec].payload_type, CodecPayloadType[this._videoCodec].clockRate);
         rtpConfigVideo.playoutDelayId = 5;
         rtpConfigVideo.playoutDelayMin = 0;
-        rtpConfigVideo.playoutDelayMax = 10;
+        rtpConfigVideo.playoutDelayMax = 30;
         this._videoDef.addRtxSSRC(videoSsrc, rtxSsrc);
         switch (this._videoCodec) {
             case "H264":
