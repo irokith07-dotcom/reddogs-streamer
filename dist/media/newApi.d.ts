@@ -118,7 +118,7 @@ export type PreparedStream = {
     /**
      * The encoded video packet stream, ready to be sent to Discord
      */
-    video: VideoStreamInfo & {
+    video?: VideoStreamInfo & {
         stream: Readable;
     };
     /**
@@ -140,9 +140,9 @@ export type PrepareStreamResult = {
 export declare function prepareStream(input: string | Readable, options?: Partial<PrepareStreamOptions>, cancelSignal?: AbortSignal): Promise<PrepareStreamResult>;
 export type PlayStreamOptions = {
     /**
-     * Set stream type as "Go Live" or camera stream
+     * Set stream type as "Go Live" or camera stream or audio player
      */
-    type: "go-live" | "camera";
+    type: "go-live" | "camera" | "cam" | "audio";
     /**
      * Set format of the stream
      */

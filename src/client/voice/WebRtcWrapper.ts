@@ -114,7 +114,8 @@ export class WebRtcConnWrapper {
     if (this.mediaConnection.daveReady)
       frame = this.mediaConnection.daveSession!.encryptOpus(frame);
     this._audioTrack?.sendMessageBinary(frame);
-    rtpConfig.timestamp += Math.round((frametime * clockRate) / 1000);
+    const step = frametime > 0 ? (frametime * clockRate) / 1000 : 960;
+    rtpConfig.timestamp += Math.round(step);
   }
 
   public sendVideoFrame(frame: Buffer, frametime: number) {
@@ -166,7 +167,7 @@ export class WebRtcConnWrapper {
     rtpConfig.timestamp += Math.round((frametime * clockRate) / 1000);
   }
 
-  public setPacketizer(videoCodec: string): void {
+  public setPacketizer(videoCodec?: string): void {
     if (!this.mediaConnection.webRtcParams)
       throw new Error("WebRTC connection not ready");
     const { audioSsrc, videoSsrc, rtxSsrc } = this.mediaConnection.webRtcParams;
@@ -178,51 +179,57 @@ export class WebRtcConnWrapper {
     );
     rtpConfigAudio.playoutDelayId = 5;
     rtpConfigAudio.playoutDelayMin = 0;
-    rtpConfigAudio.playoutDelayMax = 5;
+    rtpConfigAudio.playoutDelayMax = 15;
     this._audioPacketizer = new RtpPacketizer(rtpConfigAudio);
     this._audioPacketizer.addToChain(new RtcpSrReporter(rtpConfigAudio));
     this._audioPacketizer.addToChain(new RtcpNackResponder());
 
-    this._videoCodec = normalizeVideoCodec(videoCodec);
-    const rtpConfigVideo = new RtpPacketizationConfig(
-      videoSsrc,
-      "",
-      CodecPayloadType[this._videoCodec].payload_type,
-      CodecPayloadType[this._videoCodec].clockRate,
-    );
-    rtpConfigVideo.playoutDelayId = 5;
-    rtpConfigVideo.playoutDelayMin = 0;
-    rtpConfigVideo.playoutDelayMax = 30;
-    this._videoDef.addRtxSSRC(videoSsrc, rtxSsrc);
-    switch (this._videoCodec) {
-      case "H264":
-        this._videoPacketizer = new H264RtpPacketizer(
-          "StartSequence",
-          rtpConfigVideo,
-        );
-        break;
-      case "H265":
-        this._videoPacketizer = new H265RtpPacketizer(
-          "StartSequence",
-          rtpConfigVideo,
-        );
-        break;
-      case "VP8":
-        this._videoPacketizer = new VP8RtpPacketizer(rtpConfigVideo);
-        break;
-      case "VP9":
-        this._videoPacketizer = new VP9RtpPacketizer(rtpConfigVideo);
-        break;
-      case "AV1":
-        this._videoPacketizer = new AV1RtpPacketizer("Obu", rtpConfigVideo);
-        break;
-      default:
-        throw new Error(`Packetizer not implemented for ${this._videoCodec}`);
+    if (videoCodec) {
+      this._videoCodec = normalizeVideoCodec(videoCodec);
+      const rtpConfigVideo = new RtpPacketizationConfig(
+        videoSsrc,
+        "",
+        CodecPayloadType[this._videoCodec].payload_type,
+        CodecPayloadType[this._videoCodec].clockRate,
+      );
+      rtpConfigVideo.playoutDelayId = 5;
+      rtpConfigVideo.playoutDelayMin = 0;
+      rtpConfigVideo.playoutDelayMax = 30;
+      this._videoDef.addRtxSSRC(videoSsrc, rtxSsrc);
+      switch (this._videoCodec) {
+        case "H264":
+          this._videoPacketizer = new H264RtpPacketizer(
+            "StartSequence",
+            rtpConfigVideo,
+          );
+          break;
+        case "H265":
+          this._videoPacketizer = new H265RtpPacketizer(
+            "StartSequence",
+            rtpConfigVideo,
+          );
+          break;
+        case "VP8":
+          this._videoPacketizer = new VP8RtpPacketizer(rtpConfigVideo);
+          break;
+        case "VP9":
+          this._videoPacketizer = new VP9RtpPacketizer(rtpConfigVideo);
+          break;
+        case "AV1":
+          this._videoPacketizer = new AV1RtpPacketizer("Obu", rtpConfigVideo);
+          break;
+        default:
+          throw new Error(`Packetizer not implemented for ${this._videoCodec}`);
+      }
+      this._videoPacketizer.addToChain(new RtcpSrReporter(rtpConfigVideo));
+      this._videoPacketizer.addToChain(new RtcpNackResponder());
+      this._videoPacer = new PacingHandler(10 * 1000 * 1000, 2);
+      this._videoPacketizer.addToChain(this._videoPacer);
     }
-    this._videoPacketizer.addToChain(new RtcpSrReporter(rtpConfigVideo));
-    this._videoPacketizer.addToChain(new RtcpNackResponder());
-    this._videoPacer = new PacingHandler(10 * 1000 * 1000, 2);
-    this._videoPacketizer.addToChain(this._videoPacer);
     this._setMediaHandler();
+  }
+
+  public setAudioPacketizer(): void {
+    this.setPacketizer();
   }
 }

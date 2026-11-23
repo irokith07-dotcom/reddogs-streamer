@@ -189,7 +189,7 @@ export type PreparedStream = {
   /**
    * The encoded video packet stream, ready to be sent to Discord
    */
-  video: VideoStreamInfo & { stream: Readable };
+  video?: VideoStreamInfo & { stream: Readable };
 
   /**
    * The encoded audio packet stream, ready to be sent to Discord
@@ -1248,7 +1248,7 @@ type PlaybackState = {
 function createController(params: {
   demuxer: Demuxer;
   state: PlaybackState;
-  videoChain: TrackChain;
+  videoChain: TrackChain | undefined;
   audioChain: TrackChain | undefined;
   duration: number | undefined;
 }): Controller {
@@ -1282,7 +1282,7 @@ function createController(params: {
       // the actual flush happens inside each track's generator loop when
       // the jump to the post-seek packets is spotted, so the recreated
       // filter graph anchors on post-seek timestamps
-      videoChain.seekPending = true;
+      if (videoChain) videoChain.seekPending = true;
       if (audioChain) audioChain.seekPending = true;
       // the position is deliberately not set here: it is tracked from the
       // encoded packets that flow after the seek, so the encoder stays the
@@ -1373,12 +1373,8 @@ export async function prepareStream(
       "Selected streams",
     );
 
-    if (!vStream) {
-      throw new Error(
-        videoStreams.length === 0
-          ? "No video stream in media"
-          : "Video output cannot be disabled",
-      );
+    if (!vStream && !aStream) {
+      throw new Error("No video or audio stream in media");
     }
 
     if (startPosition > 0) {
@@ -1392,36 +1388,38 @@ export async function prepareStream(
       }
     }
 
-    if (noTranscoding && !allowedVideoCodec.has(vStream.codecpar.codecId)) {
-      throw new Error(
-        `Video codec ${codecName(vStream.codecpar.codecId)} is not allowed`,
-      );
+    let vInfo: VideoStreamInfo | undefined;
+    let outputCodec = AVCodecID.AV_CODEC_ID_NONE;
+    if (vStream) {
+      if (noTranscoding && !allowedVideoCodec.has(vStream.codecpar.codecId)) {
+        throw new Error(
+          `Video codec ${codecName(vStream.codecpar.codecId)} is not allowed`,
+        );
+      }
+
+      outputCodec = noTranscoding
+        ? vStream.codecpar.codecId
+        : preparedVideoCodecMap[videoCodec];
+
+      const codecpar = vStream.codecpar;
+      const inWidth = codecpar.width ?? 0;
+      const inHeight = codecpar.height ?? 0;
+      const sourceFramerate = avGuessFrameRate(vStream);
+      const outputSize = computeScaledDims(inWidth, inHeight, width, height);
+
+      vInfo = {
+        index: vStream.index,
+        codec: outputCodec,
+        codecpar,
+        width: noTranscoding ? inWidth : outputSize.width,
+        height: noTranscoding ? inHeight : outputSize.height,
+        framerate_num:
+          noTranscoding || !frameRate ? sourceFramerate.num : frameRate,
+        framerate_den: noTranscoding || !frameRate ? sourceFramerate.den : 1,
+        avStream: vStream,
+      };
+      logger.info({ info: vInfo }, "Prepared video stream");
     }
-
-    // with transcoding the packets sent to Discord are the encoder's output,
-    // without it the input's own packets are passed through untouched
-    const outputCodec = noTranscoding
-      ? vStream.codecpar.codecId
-      : preparedVideoCodecMap[videoCodec];
-
-    const codecpar = vStream.codecpar;
-    const inWidth = codecpar.width ?? 0;
-    const inHeight = codecpar.height ?? 0;
-    const sourceFramerate = avGuessFrameRate(vStream);
-    const outputSize = computeScaledDims(inWidth, inHeight, width, height);
-
-    const vInfo: VideoStreamInfo = {
-      index: vStream.index,
-      codec: outputCodec,
-      codecpar,
-      width: noTranscoding ? inWidth : outputSize.width,
-      height: noTranscoding ? inHeight : outputSize.height,
-      framerate_num:
-        noTranscoding || !frameRate ? sourceFramerate.num : frameRate,
-      framerate_den: noTranscoding || !frameRate ? sourceFramerate.den : 1,
-      avStream: vStream,
-    };
-    logger.info({ info: vInfo }, "Prepared video stream");
 
     let aInfo: AudioStreamInfo | undefined;
     if (aStream) {
@@ -1437,33 +1435,40 @@ export async function prepareStream(
 
     const state: PlaybackState = { position: undefined, volume };
 
-    logger.debug(
-      {
-        transcode: !noTranscoding,
-        videoCodec,
-        outputCodec: codecName(outputCodec),
-        outputSize,
-        sourceFramerate: describeRational(sourceFramerate),
-        frameRate,
-      },
-      "Creating the video chain",
-    );
-    videoChain = noTranscoding
-      ? // no transcode stage: the demuxer's packets are the output, they
-        // only need the annexb conversion
-        newTrackChain(
-          "video",
-          null,
-          createVideoBitStreamFilters(vStream, outputCodec),
-        )
-      : await createVideoChain({
-          stream: vStream,
-          codec: outputCodec,
-          options: resolved,
-          sourceFramerate,
+    if (vStream && vInfo) {
+      const sourceFramerate = avGuessFrameRate(vStream);
+      const outputSize = computeScaledDims(
+        vStream.codecpar.width ?? 0,
+        vStream.codecpar.height ?? 0,
+        width,
+        height,
+      );
+      logger.debug(
+        {
+          transcode: !noTranscoding,
+          videoCodec,
+          outputCodec: codecName(outputCodec),
           outputSize,
-          signal: cancelSignal,
-        });
+          sourceFramerate: describeRational(sourceFramerate),
+          frameRate,
+        },
+        "Creating the video chain",
+      );
+      videoChain = noTranscoding
+        ? newTrackChain(
+            "video",
+            null,
+            createVideoBitStreamFilters(vStream, outputCodec),
+          )
+        : await createVideoChain({
+            stream: vStream,
+            codec: outputCodec,
+            options: resolved,
+            sourceFramerate,
+            outputSize,
+            signal: cancelSignal,
+          });
+    }
 
     if (aInfo) {
       audioChain = await createAudioChain({
@@ -1481,14 +1486,16 @@ export async function prepareStream(
 
     logger.info(
       {
-        video: {
-          stream: vInfo.index,
-          codec: codecName(outputCodec),
-          width: vInfo.width,
-          height: vInfo.height,
-          framerate: `${vInfo.framerate_num}/${vInfo.framerate_den}`,
-          transcode: !noTranscoding,
-        },
+        video: vInfo
+          ? {
+              stream: vInfo.index,
+              codec: codecName(outputCodec),
+              width: vInfo.width,
+              height: vInfo.height,
+              framerate: `${vInfo.framerate_num}/${vInfo.framerate_den}`,
+              transcode: !noTranscoding,
+            }
+          : undefined,
         audio: aInfo
           ? {
               stream: aInfo.index,
@@ -1507,24 +1514,35 @@ export async function prepareStream(
       if (secs !== undefined) state.position = secs;
     };
 
-    const videoOut = Readable.from(
-      pumpTrack(
-        demuxer.packets(vStream.index),
-        videoChain,
-        cancelSignal,
-        trackPosition,
-      ),
-      { objectMode: true },
-    );
+    const videoOut =
+      videoChain && vStream && vInfo
+        ? Readable.from(
+            pumpTrack(
+              demuxer.packets(vStream.index),
+              videoChain,
+              cancelSignal,
+              trackPosition,
+            ),
+            { objectMode: true },
+          )
+        : undefined;
     const audioOut =
       audioChain && aInfo
         ? Readable.from(
-            pumpTrack(demuxer.packets(aInfo.index), audioChain, cancelSignal),
+            pumpTrack(
+              demuxer.packets(aInfo.index),
+              audioChain,
+              cancelSignal,
+              !videoOut ? trackPosition : undefined,
+            ),
             { objectMode: true },
           )
         : undefined;
 
-    const outputs = [videoOut, ...(audioOut ? [audioOut] : [])];
+    const outputs = [
+      ...(videoOut ? [videoOut] : []),
+      ...(audioOut ? [audioOut] : []),
+    ];
     const promise = new Promise<void>((resolve, reject) => {
       Promise.all(
         outputs.map((output) => finished(output, { cleanup: true })),
@@ -1544,7 +1562,7 @@ export async function prepareStream(
 
     return {
       output: {
-        video: { ...vInfo, stream: videoOut },
+        video: vInfo && videoOut ? { ...vInfo, stream: videoOut } : undefined,
         audio: audioOut && aInfo ? { ...aInfo, stream: audioOut } : undefined,
       },
       promise,
@@ -1564,9 +1582,9 @@ export async function prepareStream(
 
 export type PlayStreamOptions = {
   /**
-   * Set stream type as "Go Live" or camera stream
+   * Set stream type as "Go Live" or camera stream or audio player
    */
-  type: "go-live" | "camera";
+  type: "go-live" | "camera" | "cam" | "audio";
 
   /**
    * Set format of the stream
@@ -1626,7 +1644,8 @@ export async function playStream(
 ) {
   const logger = new Log("playStream");
   cancelSignal?.throwIfAborted();
-  if (!streamer.voiceConnection)
+  const voiceConn = streamer.voiceConnection;
+  if (!voiceConn)
     throw new Error("Bot is not connected to a voice channel");
 
   const defaultOptions = {
@@ -1684,27 +1703,78 @@ export async function playStream(
       });
   cancelSignal?.throwIfAborted();
 
-  if (!video) throw new Error("No video stream in media");
+  if (!video && !audio) throw new Error("No video or audio stream in media");
 
   const cleanupFuncs: (() => unknown)[] = [];
+  const isAudioMode = mergedOptions.type === "audio" || (!video && !!audio);
+
+  // Pure audio playback directly into the Discord voice channel
+  if (isAudioMode && audio) {
+    const conn = voiceConn.webRtcConn;
+    conn.setAudioPacketizer();
+    conn.mediaConnection.setSpeaking(true);
+    try {
+      voiceConn.setSpeaking(true);
+    } catch {}
+
+    const aStream = new AudioStream(conn);
+    audio.stream.pipe(aStream);
+
+    const promise = new Promise<void>((resolve, reject) => {
+      let cleanedUp = false;
+      const cleanup = () => {
+        if (cleanedUp) return;
+        cleanedUp = true;
+        for (const f of cleanupFuncs) f();
+        try {
+          conn.mediaConnection.setSpeaking(false);
+          voiceConn.setSpeaking(false);
+        } catch {}
+      };
+      cancelSignal?.addEventListener(
+        "abort",
+        () => {
+          cleanup();
+          reject(cancelSignal.reason);
+        },
+        { once: true },
+      );
+      aStream.once("finish", () => {
+        if (cancelSignal?.aborted) return;
+        cleanup();
+        resolve();
+      });
+      aStream.once("error", (err) => {
+        cleanup();
+        reject(err);
+      });
+    });
+    promise.catch(() => {});
+    return promise;
+  }
+
+  if (!video) throw new Error("No video stream in media");
 
   let conn: WebRtcConnWrapper;
   let stopStream: () => unknown;
   if (mergedOptions.type === "go-live") {
-    if (streamer.voiceConnection.streamConnection?.webRtcConn) {
-      conn = streamer.voiceConnection.streamConnection.webRtcConn;
+    if (voiceConn.streamConnection?.webRtcConn) {
+      conn = voiceConn.streamConnection.webRtcConn;
       stopStream = () => streamer.stopStream();
     } else {
       conn = await streamer.createStream();
       stopStream = () => streamer.stopStream();
     }
   } else {
-    conn = streamer.voiceConnection.webRtcConn;
+    conn = voiceConn.webRtcConn;
     streamer.signalVideo(true);
     stopStream = () => streamer.signalVideo(false);
   }
   conn.setPacketizer(videoCodecMap[video.codec]);
   conn.mediaConnection.setSpeaking(true);
+  try {
+    voiceConn.setSpeaking(true);
+  } catch {}
   const { width, height, frameRate } = mergedOptions;
   conn.mediaConnection.setVideoAttributes(true, {
     width: Math.round(typeof width === "function" ? width(video) : width),
@@ -1721,14 +1791,15 @@ export async function playStream(
     audio.stream.pipe(aStream);
     vStream.syncStream = aStream;
 
+    // AUDIO BURST FIX: Only burst video, keep audio paced in real time so packets are never dropped by Discord
     const burstTime = mergedOptions.readrateInitialBurst;
     if (typeof burstTime === "number") {
       vStream.sync = false;
-      vStream.noSleep = aStream.noSleep = true;
+      vStream.noSleep = true;
       const stopBurst = (pts: number) => {
         if (pts < burstTime * 1000) return;
         vStream.sync = true;
-        vStream.noSleep = aStream.noSleep = false;
+        vStream.noSleep = false;
         vStream.off("pts", stopBurst);
       };
       vStream.on("pts", stopBurst);
@@ -1794,6 +1865,9 @@ export async function playStream(
         stopStream();
       }
       conn.mediaConnection.setSpeaking(false);
+      try {
+        voiceConn.setSpeaking(false);
+      } catch {}
       conn.mediaConnection.setVideoAttributes(false);
     };
     cancelSignal?.addEventListener(

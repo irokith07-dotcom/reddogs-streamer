@@ -21,5 +21,6 @@ export declare class WebRtcConnWrapper {
     get mediaConnection(): BaseMediaConnection;
     sendAudioFrame(frame: Buffer, frametime: number): void;
     sendVideoFrame(frame: Buffer, frametime: number): void;
-    setPacketizer(videoCodec: string): void;
+    setPacketizer(videoCodec?: string): void;
+    setAudioPacketizer(): void;
 }

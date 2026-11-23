@@ -826,25 +826,29 @@ class BotSession {
         cycle++;
         console.log(`[${this.user?.tag || this.label}] Loop cycle #${cycle}: ${resolved} (Mode: ${mode}, Loop: ${loop})`);
         try {
-          // Attempt passthrough mode first (zero re-encoding overhead, ~0MB RAM, 0% CPU load)
+          // Attempt preparation: if audio mode, demux directly; otherwise try passthrough first
           let prepResult;
-          try {
-            prepResult = await prepareStream(resolved, { noTranscoding: true }, signal);
-          } catch (passthroughErr) {
-            console.log(`[${this.user?.tag || this.label}] Passthrough mode skipped (${passthroughErr?.message}), using memory-safe 360p profile...`);
-            prepResult = await prepareStream(
-              resolved,
-              {
-                noTranscoding: false,
-                width: 640,
-                height: 360,
-                frameRate: 24,
-                bitrateVideo: 400,
-                bitrateVideoMax: 700,
-                videoCodec: Utils.normalizeVideoCodec("H264"),
-              },
-              signal
-            );
+          if (mode === "audio") {
+            prepResult = await prepareStream(resolved, {}, signal);
+          } else {
+            try {
+              prepResult = await prepareStream(resolved, { noTranscoding: true }, signal);
+            } catch (passthroughErr) {
+              console.log(`[${this.user?.tag || this.label}] Passthrough mode skipped (${passthroughErr?.message}), using memory-safe 360p profile...`);
+              prepResult = await prepareStream(
+                resolved,
+                {
+                  noTranscoding: false,
+                  width: 640,
+                  height: 360,
+                  frameRate: 24,
+                  bitrateVideo: 400,
+                  bitrateVideoMax: 700,
+                  videoCodec: Utils.normalizeVideoCodec("H264"),
+                },
+                signal
+              );
+            }
           }
 
           const { output, promise } = prepResult;
@@ -853,13 +857,19 @@ class BotSession {
             console.log(`[${this.user?.tag || this.label}] Stream prep error:`, err?.message || err);
           });
 
+          // Determine actual playback mode: if media has only audio, seamlessly route to pure audio mode
+          const actualMode = (mode === "audio" || !output.video) ? "audio" : (mode === "cam" ? "cam" : "go-live");
+          if (!output.video && mode !== "audio") {
+            console.log(`[${this.user?.tag || this.label}] Media has only audio; seamlessly playing in Voice Audio mode.`);
+          }
+
           await playStream(
             output,
             this.streamer,
             {
-              type: mode === "cam" ? "cam" : "go-live",
-              keepStreamAlive: loop && !signal.aborted,
-              readrateInitialBurst: 3.0,
+              type: actualMode,
+              keepStreamAlive: loop && !signal.aborted && actualMode !== "audio",
+              readrateInitialBurst: actualMode === "audio" ? undefined : 3.0,
             },
             signal
           );
@@ -872,12 +882,12 @@ class BotSession {
           if (loop && !signal.aborted) {
             console.log(`[${this.user?.tag || this.label}] Loop active: preparing cycle #${cycle + 1}...`);
             try {
-              if (this.streamer && mode !== "cam") {
+              if (this.streamer && actualMode !== "cam" && actualMode !== "audio") {
                 this.streamer.stopStream();
               }
             } catch {}
-            // Brief 600ms pause to let media buffers clear and re-handshake cleanly
-            await new Promise((r) => setTimeout(r, 600));
+            // Brief pause to let media buffers clear and re-handshake cleanly
+            await new Promise((r) => setTimeout(r, actualMode === "audio" ? 400 : 600));
           }
         } catch (err) {
           if (signal.aborted) break;
@@ -897,7 +907,7 @@ class BotSession {
 
           // Clean reset stream track before retrying next cycle
           try {
-            if (this.streamer && mode !== "cam") this.streamer.stopStream();
+            if (this.streamer && mode !== "cam" && mode !== "audio") this.streamer.stopStream();
           } catch {}
 
           await new Promise((r) => setTimeout(r, 2000));
